@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elemental Auto-Drift Split Screen</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; background-color: #000; overflow: hidden; color: white; font-family: sans-serif; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+<script>
+const ELEMENTS =['AIR', 'WATER', 'FIRE', 'EARTH'];
+
+// Element color mapping for visuals
+const COLOR_MAP = {
+    AIR: 0xdddddd,   // Light Gray / White
+    WATER: 0x3399ff, // Blue
+    FIRE: 0xff4400,  // Red/Orange
+    EARTH: 0x66cc33  // Green
+};
+const TEXT_COLOR_MAP = {
+    AIR: '#dddddd', WATER: '#3399ff', FIRE: '#ff4400', EARTH: '#66cc33'
+};
+
+const ITEMS = {
+    AIR:[{name: 'Blow\n(Speed 2x)', dur: 3}, {name: 'Spiral\n(Turn 90°)', dur: 0}, {name: 'Opp Blow\n(Slow)', dur: 3}],
+    WATER:[{name: 'Slip\n(Drift)', dur: 3}, {name: 'Flood\n(Throw Fwd)', dur: 0}, {name: 'Tsunami\n(Shuffle)', dur: 3}],
+    FIRE:[{name: 'Sun\n(Blind)', dur: 3}, {name: 'Campfire\n(Stun)', dur: 3}, {name: 'Burn\n(Destroy)', dur: 3}],
+    EARTH:[{name: 'Grab\n(Freeze)', dur: 3}, {name: 'Burrow\n(Invis)', dur: 3}, {name: 'Throw\n(Break 1)', dur: 0}]
+};
+
+class MainGame extends Phaser.Scene {
+    constructor() { super('MainGame'); }
+
+    preload() {
+        // Generate pseudo-3D Car Texture
+        let g = this.add.graphics();
+        g.fillStyle(0xffffff, 1);
+        g.fillRoundedRect(0, 0, 40, 24, 6);
+        g.fillStyle(0x000000, 0.8);
+        g.fillRect(25, 2, 10, 20); // Front window (pointing right)
+        g.fillRect(5, 2, 8, 20);  // Back window
+        g.generateTexture('car', 40, 24);
+        g.clear();
+
+        // Base shape for items
+        g.fillStyle(0xffffff, 1);
+        g.fillCircle(20, 20, 20);
+        g.generateTexture('circleBase', 40, 40);
+        g.destroy();
+    }
+
+    create() {
+        let width = this.sys.game.config.width;
+        let height = this.sys.game.config.height;
+        let halfWidth = width / 2;
+
+        // Create independent distinct Arena backgrounds
+        this.add.rectangle(1000, 1000, 2000, 2000, 0x1a2630); // P1 Arena
+        this.add.rectangle(4000, 1000, 2000, 2000, 0x30261a); // P2 Arena
+
+        // Determine Elements Randomly
+        let shuffled = Phaser.Utils.Array.Shuffle([...ELEMENTS]);
+        
+        // Setup Player 1
+        this.p1 = this.createPlayer(1000, 1000, shuffled[0], { x: 0, y: 0, right: 2000, bottom: 2000 });
+        this.p1.keys = { left: this.input.keyboard.addKey('A'), right: this.input.keyboard.addKey('D') };
+        
+        // Setup Player 2
+        this.p2 = this.createPlayer(4000, 1000, shuffled[1], { x: 3000, y: 0, right: 5000, bottom: 2000 });
+        this.p2.keys = { left: this.input.keyboard.addKey('LEFT'), right: this.input.keyboard.addKey('RIGHT') };
+
+        // Cross-reference opponents
+        this.p1.opponent = this.p2;
+        this.p2.opponent = this.p1;
+
+        // Camera Setup (Split Screen)
+        this.cam1 = this.cameras.main;
+        this.cam1.setSize(halfWidth, height).startFollow(this.p1.sprite);
+        this.p1.cam = this.cam1;
+
+        this.cam2 = this.cameras.add(halfWidth, 0, halfWidth, height);
+        this.cam2.startFollow(this.p2.sprite);
+        this.p2.cam = this.cam2;
+
+        // Split line
+        this.add.rectangle(halfWidth, height/2, 6, height, 0xffffff).setScrollFactor(0).setDepth(2000);
+
+        // Build UIs
+        this.createUI(this.p1, this.cam1, this.cam2);
+        this.createUI(this.p2, this.cam2, this.cam1);
+
+        // Controls hint
+        this.p1.uiGroup.add(this.add.text(halfWidth/2, 20, "Controls: A / D\nSabotage: 1, 2, 3 or Click", { align: 'center' }).setOrigin(0.5, 0).setScrollFactor(0));
+        this.p2.uiGroup.add(this.add.text(halfWidth/2, 20, "Controls: L / R Arrows\nSabotage: 7, 8, 9 or Click", { align: 'center' }).setOrigin(0.5, 0).setScrollFactor(0));
+
+        // Start 2.5s middle interval item spawning
+        this.time.addEvent({ delay: 2500, loop: true, callback: () => {
+            this.spawnItem(this.p1);
+            this.spawnItem(this.p2);
+        }});
+        this.spawnItem(this.p1); // Immediate start (0s)
+        this.spawnItem(this.p2);
+
+        // Keyboard Sabotage Handlers
+        this.input.keyboard.on('keydown', (e) => {
+            if(e.key === '1') this.activateSabotage(this.p1, 0);
+            if(e.key === '2') this.activateSabotage(this.p1, 1);
+            if(e.key === '3') this.activateSabotage(this.p1, 2);
+            if(e.key === '7') this.activateSabotage(this.p2, 0);
+            if(e.key === '8') this.activateSabotage(this.p2, 1);
+            if(e.key === '9') this.activateSabotage(this.p2, 2);
+        });
+    }
+
+    createPlayer(x, y, el, bounds) {
+        let sprite = this.physics.add.sprite(x, y, 'car');
+        sprite.setTint(COLOR_MAP[el]);
+        
+        let player = {
+            sprite: sprite,
+            element: el,
+            bounds: bounds,
+            angle: 0,
+            baseSpeed: 250,
+            score: 0,
+            loosePoints: 0,
+            stacks:[false, false, false],
+            itemsGroup: this.add.group(),
+            debuffs: { speedMulti: 1, slip: false, stunned: false, burn: false },
+            uiGroup: this.add.group()
+        };
+        return player;
+    }
+
+    createUI(player, ownCam, oppCam) {
+        player.ui = {};
+        let h = ownCam.height;
+        let yBase = h - 90;
+
+        player.ui.scoreText = this.add.text(20, 20, 'Score: 0', { fontSize: '24px', fontStyle: 'bold' }).setScrollFactor(0);
+        player.ui.penaltyText = this.add.text(20, 55, 'Loose Points: 0', { fontSize: '20px', fill: '#ff5555' }).setScrollFactor(0);
+        player.ui.elementText = this.add.text(20, 90, 'You: ' + player.element, { fontSize: '22px', fill: TEXT_COLOR_MAP[player.element] }).setScrollFactor(0);
+        
+        player.uiGroup.addMultiple([player.ui.scoreText, player.ui.penaltyText, player.ui.elementText]);
+
+        // Stack UI
+        let oppItems = ITEMS[player.opponent.element];
+        let stackLabel = this.add.text(20, yBase - 30, `Target: ${player.opponent.element} (Sabotage Stacks):`, { fontSize: '18px', fill: TEXT_COLOR_MAP[player.opponent.element] }).setScrollFactor(0).setDepth(100);
+        player.uiGroup.add(stackLabel);
+
+        player.ui.stackBoxes =[];
+        player.ui.stackTexts =[];
+
+        for(let i=0; i<3; i++) {
+            let box = this.add.rectangle(70 + i*110, yBase + 40, 100, 70, 0x444444).setInteractive().setScrollFactor(0).setDepth(100);
+            let txt = this.add.text(70 + i*110, yBase + 40, oppItems[i].name + '\n(Empty)', { fontSize: '14px', align: 'center', color: '#aaaaaa' }).setOrigin(0.5).setScrollFactor(0).setDepth(101);
+            
+            box.on('pointerdown', () => this.activateSabotage(player, i));
+            player.ui.stackBoxes.push(box);
+            player.ui.stackTexts.push(txt);
+            player.uiGroup.addMultiple([box, txt]);
+        }
+
+        // Sun Blind Overlay
+        player.ui.sunRect = this.add.rectangle(ownCam.width/2, h/2, ownCam.width, h, 0xffffff, 0).setScrollFactor(0).setDepth(500);
+        player.uiGroup.add(player.ui.sunRect);
+
+        // Hide entirely from the opponent's camera
+        oppCam.ignore(player.uiGroup.getChildren());
+    }
+
+    spawnItem(player) {
+        let el = Phaser.Utils.Array.GetRandom(ELEMENTS);
+        let type = Phaser.Math.Between(0, 2);
+        let nameStr = ITEMS[el][type].name.split('\n')[0]; 
+
+        let x = Phaser.Math.Between(player.bounds.x + 50, player.bounds.right - 50);
+        let y = Phaser.Math.Between(player.bounds.y + 50, player.bounds.bottom - 50);
+
+        let circle = this.add.image(0, 0, 'circleBase').setTint(COLOR_MAP[el]);
+        let text = this.add.text(0, 0, nameStr.substring(0,4), { fontSize: '13px', color: '#000', fontStyle: 'bold' }).setOrigin(0.5);
+        let container = this.add.container(x, y, [circle, text]);
+        
+        container.setSize(40, 40);
+        this.physics.world.enable(container);
+        
+        container.setData('element', el);
+        container.setData('type', type);
+        container.setData('lifespan', 5000);
+        container.setData('frozen', false);
+
+        // 3D Pop and Hover animations
+        container.setScale(0);
+        this.tweens.add({ targets: container, scale: 1, duration: 300, ease: 'Back.out' });
+        this.tweens.add({ targets: [circle, text], y: -10, duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+
+        // Shadow for depth
+        let shadow = this.add.ellipse(x, y + 15, 25, 12, 0x000000, 0.4);
+        container.setData('shadow', shadow);
+
+        player.itemsGroup.add(container);
+        this.physics.add.overlap(player.sprite, container, () => this.collectItem(player, container));
+    }
+
+    collectItem(player, item) {
+        if (!item.active) return;
+        
+        if (player.debuffs.burn) {
+            this.destroyItem(item); // Incinerated, doesn't count
+            return;
+        }
+
+        let el = item.getData('element');
+        let type = item.getData('type');
+
+        if (el === player.element) {
+            player.score++;
+        } else if (el === player.opponent.element) {
+            player.stacks[type] = true; // Stored (max 1 replaces old)
+        } else {
+            player.loosePoints++;
+        }
+
+        this.updateUI(player);
+        this.destroyItem(item);
+    }
+
+    destroyItem(item) {
+        let shadow = item.getData('shadow');
+        if (shadow) shadow.destroy();
+        item.destroy();
+    }
+
+    activateSabotage(player, idx) {
+        if (!player.stacks[idx]) return;
+        
+        player.stacks[idx] = false; // Consume stack
+        this.updateUI(player);
+
+        let opp = player.opponent;
+        let effectName = ITEMS[opp.element][idx].name.split('\n')[0];
+
+        // Apply Effect
+        if(effectName === 'Blow') {
+            opp.debuffs.speedMulti = 2;
+            this.time.delayedCall(3000, () => opp.debuffs.speedMulti = 1);
+        }
+        else if(effectName === 'Spiral') {
+            opp.angle += (Math.random() > 0.5 ? Math.PI/2 : -Math.PI/2);
+        }
+        else if(effectName === 'Opp Blow') {
+            opp.debuffs.speedMulti = 0.5;
+            this.time.delayedCall(3000, () => opp.debuffs.speedMulti = 1);
+        }
+        else if(effectName === 'Slip') {
+            opp.debuffs.slip = true;
+            this.time.delayedCall(3000, () => opp.debuffs.slip = false);
+        }
+        else if(effectName === 'Flood') {
+            this.tweens.add({ targets: opp.sprite, x: opp.sprite.x + Math.cos(opp.angle)*250, y: opp.sprite.y + Math.sin(opp.angle)*250, duration: 400, ease: 'Cubic.easeOut' });
+        }
+        else if(effectName === 'Tsunami') {
+            let wave = this.add.rectangle(opp.bounds.x + 1000, opp.bounds.y + 1000, 2000, 2000, 0x3399ff, 0.4).setDepth(10);
+            this.time.delayedCall(3000, () => wave.destroy());
+            
+            opp.itemsGroup.children.iterate(i => {
+                if(i && i.active) {
+                    this.tweens.add({ targets: i, 
+                        x: Phaser.Math.Clamp(i.x + Phaser.Math.Between(-300, 300), opp.bounds.x+40, opp.bounds.right-40),
+                        y: Phaser.Math.Clamp(i.y + Phaser.Math.Between(-300, 300), opp.bounds.y+40, opp.bounds.bottom-40),
+                        duration: 1000, ease: 'Cubic.easeOut' });
+                }
+            });
+        }
+        else if(effectName === 'Sun') {
+            opp.ui.sunRect.setAlpha(0.75);
+            this.time.delayedCall(3000, () => opp.ui.sunRect.setAlpha(0));
+        }
+        else if(effectName === 'Campfire') {
+            let cx = Phaser.Math.Clamp(opp.sprite.x + Math.cos(opp.angle)*300, opp.bounds.x+50, opp.bounds.right-50);
+            let cy = Phaser.Math.Clamp(opp.sprite.y + Math.sin(opp.angle)*300, opp.bounds.y+50, opp.bounds.bottom-50);
+            let camp = this.physics.add.sprite(cx, cy, 'circleBase').setTint(0xff8800).setScale(1.2);
+            
+            this.physics.add.overlap(opp.sprite, camp, () => {
+                opp.debuffs.stunned = true;
+                if (camp.active) camp.destroy();
+                this.time.delayedCall(2000, () => opp.debuffs.stunned = false);
+            });
+            this.time.delayedCall(3000, () => { if(camp && camp.active) camp.destroy(); });
+        }
+        else if(effectName === 'Burn') {
+            opp.debuffs.burn = true;
+            opp.sprite.setTint(0xffff00);
+            this.time.delayedCall(3000, () => {
+                opp.debuffs.burn = false;
+                opp.sprite.setTint(COLOR_MAP[opp.element]); // Restore element color
+            });
+        }
+        else if(effectName === 'Grab') {
+            opp.itemsGroup.children.iterate(i => {
+                if(i) { i.setData('frozen', true); this.time.delayedCall(3000, () => i.setData('frozen', false)); }
+            });
+        }
+        else if(effectName === 'Burrow') {
+            opp.itemsGroup.children.iterate(i => {
+                if(i) {
+                    i.setAlpha(0);
+                    let sh = i.getData('shadow'); if(sh) sh.setAlpha(0);
+                    this.time.delayedCall(3000, () => { i.setAlpha(1); if(sh) sh.setAlpha(0.4); });
+                }
+            });
+        }
+        else if(effectName === 'Throw') {
+            let activeItems = opp.itemsGroup.getChildren().filter(i => i.active);
+            if(activeItems.length > 0) {
+                this.destroyItem(Phaser.Utils.Array.GetRandom(activeItems));
+            }
+        }
+    }
+
+    updateUI(player) {
+        player.ui.scoreText.setText('Score: ' + player.score);
+        player.ui.penaltyText.setText('Loose Points: ' + player.loosePoints);
+
+        let oppItems = ITEMS[player.opponent.element];
+        for(let i=0; i<3; i++) {
+            if (player.stacks[i]) {
+                player.ui.stackBoxes[i].setFillStyle(0x22aa22); // Highlight green
+                player.ui.stackTexts[i].setText(oppItems[i].name).setColor('#ffffff');
+            } else {
+                player.ui.stackBoxes[i].setFillStyle(0x444444);
+                player.ui.stackTexts[i].setText(oppItems[i].name + '\n(Empty)').setColor('#aaaaaa');
+            }
+        }
+    }
+
+    update(time, delta) {
+        this.updatePlayer(this.p1, delta);
+        this.updatePlayer(this.p2, delta);
+        
+        this.updateItems(this.p1, delta);
+        this.updateItems(this.p2, delta);
+    }
+
+    updatePlayer(p, delta) {
+        let speed = p.baseSpeed * p.debuffs.speedMulti;
+        if (p.debuffs.stunned) speed = 0;
+
+        let turnRate = p.debuffs.slip ? 0.03 : 0.055;
+        if (p.keys.left.isDown) p.angle -= turnRate;
+        if (p.keys.right.isDown) p.angle += turnRate;
+
+        let targetVx = Math.cos(p.angle) * speed;
+        let targetVy = Math.sin(p.angle) * speed;
+
+        if (p.debuffs.slip) {
+             p.sprite.body.velocity.x += (targetVx - p.sprite.body.velocity.x) * 0.05;
+             p.sprite.body.velocity.y += (targetVy - p.sprite.body.velocity.y) * 0.05;
+        } else {
+             p.sprite.body.velocity.x += (targetVx - p.sprite.body.velocity.x) * 0.3;
+             p.sprite.body.velocity.y += (targetVy - p.sprite.body.velocity.y) * 0.3;
+        }
+
+        p.sprite.rotation = p.angle;
+
+        // Bouncing off boundary
+        let b = p.bounds, s = p.sprite;
+        if (s.x < b.x) { s.x = b.x; p.angle = Math.PI - p.angle; }
+        if (s.x > b.right) { s.x = b.right; p.angle = Math.PI - p.angle; }
+        if (s.y < b.y) { s.y = b.y; p.angle = -p.angle; }
+        if (s.y > b.bottom) { s.y = b.bottom; p.angle = -p.angle; }
+    }
+
+    updateItems(p, delta) {
+        let toDestroy =[];
+        p.itemsGroup.children.iterate(item => {
+            if (!item || !item.active) return;
+            if (!item.getData('frozen')) {
+                let ls = item.getData('lifespan') - delta;
+                item.setData('lifespan', ls);
+                if (ls <= 0) toDestroy.push(item);
+            }
+        });
+        toDestroy.forEach(i => this.destroyItem(i));
+    }
+}
+
+const config = {
+    type: Phaser.AUTO,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    physics: { default: 'arcade', arcade: { debug: false } },
+    scene: [MainGame]
+};
+
+new Phaser.Game(config);
+
+window.addEventListener('resize', () => window.location.reload());
+</script>
+</body>
+</html>
